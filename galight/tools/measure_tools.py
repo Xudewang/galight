@@ -8,24 +8,27 @@ Created on Mon Sep  7 14:38:27 2020
 A group of function to measure the photometry.
 """
 
-import numpy as np
-import matplotlib.pyplot as plt
-import astropy.io.fits as pyfits
+import copy
 
+import astropy.io.fits as pyfits
+import matplotlib
+import matplotlib.pyplot as plt
+import numpy as np
 import scipy.ndimage as ndimage
 import scipy.ndimage.filters as filters
+from galight.tools.astro_tools import plt_fits
 from matplotlib.colors import LogNorm
 from matplotlib.ticker import AutoMinorLocator
-import copy
-import matplotlib
-from photutils import make_source_mask
-from galight.tools.astro_tools import plt_fits 
+from photutils.segmentation import deblend_sources, detect_sources
+
 my_cmap = copy.copy(matplotlib.cm.get_cmap('gist_heat')) # copy the default cmap
 my_cmap.set_bad('black')
 import photutils
-from galight.tools.cutout_tools import stack_PSF  #!!! Will be removed in next version.
-from packaging import version
+from galight.tools.cutout_tools import \
+    stack_PSF  # !!! Will be removed in next version.
 from galight.tools.cutout_tools import pix_region
+from packaging import version
+
 
 def find_loc_max(image, neighborhood_size = 8, threshold = 5):
     """
@@ -124,7 +127,7 @@ def measure_FWHM(image, radius = 10):
     y_n = np.asarray([image[y_center+i][x_center] for i in range(-radius, radius+1)]) # The y value, horizontal 
     xy_n = np.asarray([image[y_center+i][x_center+i] for i in range(-radius, radius+1)]) # The up right value, horizontal
     xy__n =  np.asarray([image[y_center-i][x_center+i] for i in range(-radius, radius+1)]) # The up right value, horizontal
-    from astropy.modeling import models, fitting
+    from astropy.modeling import fitting, models
     g_init = models.Gaussian1D(amplitude=y_n.max(), mean=radius, stddev=1.5)
     fit_g = fitting.LevMarLSQFitter()
     g_x = fit_g(g_init, range(seed_num), x_n)
@@ -419,9 +422,14 @@ def measure_bkg(img, if_plot=False, nsigma=2, npixels=25, dilate_size=11):
 #    else:
 #        sigma_clip = SigmaClip(sigma=3., iters=10)
     bkg_estimator = SExtractorBackground()
-    if version.parse(photutils.__version__) > version.parse("0.7"):
+    if version.parse(photutils.__version__) > version.parse("0.7") and version.parse(photutils.__version__) < version.parse("1.7"):
+        from photutils import make_source_mask
         mask_0 = make_source_mask(img, nsigma=nsigma, npixels=npixels, dilate_size=dilate_size)
+    elif version.parse(photutils.__version__) >= version.parse("1.8"):
+        segmap = detect_sources(img, nsigma=nsigma, npixels=npixels)
+        mask_0 = segmap.make_source_mask(size=dilate_size)
     else:
+        from photutils import make_source_mask
         mask_0 = make_source_mask(img, snr=nsigma, npixels=npixels, dilate_size=dilate_size)
     mask_1 = (np.isnan(img))
     mask_2 = (img==0)
@@ -591,11 +599,10 @@ def detect_obj(image, detect_tool = 'phot', exp_sz= 1.2, if_plot=False, auto_sor
     apertures = []
     from photutils import detect_threshold
     if detect_tool == 'phot':
+        from astropy.convolution import Gaussian2DKernel, convolve
         from astropy.stats import gaussian_fwhm_to_sigma
-        from astropy.convolution import Gaussian2DKernel
-        from photutils import detect_sources,deblend_sources   
-        from photutils.segmentation import SourceCatalog 
-        from astropy.convolution import convolve
+        from photutils import deblend_sources, detect_sources
+        from photutils.segmentation import SourceCatalog
         if version.parse(photutils.__version__) > version.parse("0.7"):
             threshold = detect_threshold(image, nsigma=nsigma)
         else:
@@ -608,10 +615,14 @@ def detect_obj(image, detect_tool = 'phot', exp_sz= 1.2, if_plot=False, auto_sor
         # Filtering the image will smooth the noise and maximize detectability of 
         # objects with a shape similar to the kernel.
         
-        if version.parse(photutils.__version__) >= version.parse("1.2.0"):
+        if version.parse(photutils.__version__) >= version.parse("1.2.0") and version.parse(photutils.__version__) < version.parse("1.8.0"):
             segm = detect_sources(convolved_image, threshold, npixels=npixels, kernel=None)
             segm_deblend = deblend_sources(convolved_image, segm, npixels=npixels,
                                             kernel=None, nlevels=nlevels,
+                                            contrast=contrast)
+        elif version.parse(photutils.__version__) >= version.parse("1.8.0"):
+            segm = detect_sources(convolved_image, threshold, npixels=npixels)
+            segm_deblend = deblend_sources(convolved_image, segm, npixels=npixels, nlevels=nlevels,
                                             contrast=contrast)
         else:
             segm = detect_sources(convolved_image, threshold, npixels=npixels, filter_kernel=None)
@@ -705,9 +716,13 @@ def detect_obj(image, detect_tool = 'phot', exp_sz= 1.2, if_plot=False, auto_sor
                      bbox={'facecolor': 'white', 'alpha': 0.5, 'pad': 1})
         for i in range(len(apertures)):
             aperture = apertures[i]
-            if version.parse(photutils.__version__) > version.parse("0.7"):
+            
+            if version.parse(photutils.__version__) > version.parse("0.7") and version.parse(photutils.__version__) < version.parse("1.8"):
                 aperture.plot(color='white', lw=1.5, axes=ax1)
-                aperture.plot(color='white', lw=1.5, axes=ax2)           
+                aperture.plot(color='white', lw=1.5, axes=ax2)       
+            elif version.parse(photutils.__version__) >= version.parse("1.8"):    
+                aperture.plot(color='white', lw=1.5, ax=ax1)
+                aperture.plot(color='white', lw=1.5, ax=ax2)  
             else:
                 aperture.plot(color='white', lw=1.5, ax=ax1)
                 aperture.plot(color='white', lw=1.5, ax=ax2)                       
@@ -733,8 +748,8 @@ def mask_obj(image, apertures, if_plot = False, sum_mask = False):
     """
     Automaticlly generate a list of masked based on the input apertures.
     """
-    from regions import PixCoord, EllipsePixelRegion
     from astropy.coordinates import Angle
+    from regions import EllipsePixelRegion, PixCoord
     masks = []  # In the script, the objects are 1, emptys are 0.
     for i in range(len(apertures)):
         aperture = apertures[i]
@@ -802,6 +817,7 @@ def model_flux_cal(params_list, model_list = None, sersic_major_axis=None):
         The flux value of Sersic.
     """    
     from lenstronomy.LightModel.light_model import LightModel
+
     # if model_list is None:
     #     model_list = ['SERSIC_ELLIPSE'] * len(params_list)
     flux = []
@@ -866,6 +882,7 @@ def fit_data_twoD_Gaussian(data, popt_ini = None, if_plot= False):
         Parameters in twoD_Gaussian, i.e., amplitude, xo, yo, sigma_x, sigma_y, theta, offset
     """ 
     import scipy.optimize as opt
+
     # x = np.linspace(0, len(data)-1, len(data))
     # y = np.linspace(0, len(data)-1, len(data))
     # x, y = np.meshgrid(x, y)
